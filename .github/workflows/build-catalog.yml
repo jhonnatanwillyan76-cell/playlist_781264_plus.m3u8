@@ -1,0 +1,32 @@
+# DEPLOY: copie este arquivo para o REPO DA PLAYLIST em
+#   .github/workflows/build-catalog.yml
+# junto com tool/build-catalog.mjs (ver ../deploy/README.md).
+# NÃO fica em .github/workflows/ do repo do APP de propósito: lá ele rodaria
+# sem o .m3u8 e falharia todo dia. O dado (m3u8 + catalog/) mora no repo da playlist.
+name: build-catalog
+on:
+  push:
+    paths: ['playlist_781264_plus.m3u8']
+  schedule:
+    - cron: '0 6 * * *'   # diário 06:00 UTC (backstop)
+  workflow_dispatch: {}
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '20' }
+      - name: Gerar catálogo
+        env:
+          CATALOG_TS: ${{ github.run_id }}
+        run: node tool/build-catalog.mjs playlist_781264_plus.m3u8 catalog
+      - name: Commit artefatos
+        run: |
+          git config user.name "catalog-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add catalog
+          git diff --cached --quiet || git commit -m "chore(catalog): regenera JSON [skip ci]"
+          git push
