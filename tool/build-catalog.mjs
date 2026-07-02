@@ -197,6 +197,22 @@ async function tmdbShowPoster(name, tries = 2) {
   return hit ? hit.poster_path.replace(/^\//, '') : null;
 }
 
+// Durabilidade SEM key nem ação do usuário: reaproveita os pôsteres do
+// series-index.json JÁ publicado (já enriquecidos). Assim uma re-geração do
+// Action (cron diário) NÃO volta as capas boas pras ruins da raw quando não há
+// TMDB_KEY. Casa por slug (estável). Séries novas (fora do índice antigo) seguem
+// pro enriquecimento (se houver key) ou ficam com a capa da raw.
+export function reusePosters(shows, prevShows) {
+  const bySlug = new Map();
+  for (const s of prevShows || []) if (s.poster && s.slug) bySlug.set(s.slug, s.poster);
+  let kept = 0;
+  for (const s of shows) {
+    const p = bySlug.get(s.slug);
+    if (p && p !== s.poster) { s.poster = p; kept++; }
+  }
+  return kept;
+}
+
 export async function enrichShowPosters(shows, { concurrency = 10, fetchPoster = tmdbShowPoster } = {}) {
   const cnt = new Map();
   for (const s of shows) if (s.poster) cnt.set(s.poster, (cnt.get(s.poster) || 0) + 1);
@@ -218,11 +234,19 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   if (!input || !outDir) { console.error('uso: node build-catalog.mjs <input.m3u8> <outDir>'); process.exit(1); }
   const text = await readFile(input, 'utf8');
   const c = buildCatalog(text);
+  // 1) DURÁVEL: preserva as capas boas já publicadas (sem key, sem rede) — evita
+  //    que o cron do Action volte as capas boas pras ruins da raw.
+  try {
+    const prev = JSON.parse(await readFile(join(outDir, 'series-index.json'), 'utf8')).shows;
+    const kept = reusePosters(c.shows, prev);
+    if (kept) console.log(`capas de série reaproveitadas do índice publicado: ${kept}`);
+  } catch {}
+  // 2) Enriquece as que ainda estão ruins (só com TMDB_KEY; cobre série nova).
   if (process.env.SKIP_ENRICH !== '1' && TMDB_KEY) {
     const er = await enrichShowPosters(c.shows);
     console.log('capas de série enriquecidas (TMDB):', er);
   } else {
-    console.log('enriquecimento de capas PULADO (sem TMDB_KEY) — capas ficam as da raw.');
+    console.log('enriquecimento TMDB pulado (sem TMDB_KEY) — capas mantidas do índice publicado/raw.');
   }
   const stats = await writeArtifacts(c, outDir);
   console.log('catálogo gerado:', stats);
