@@ -17,9 +17,11 @@ function attr(line, key) {
   return m ? m[1].trim() : null;
 }
 
+// PRESERVA o case original do hash: o TMDB é case-sensitive na URL da imagem
+// (8HzA55… funciona; 8hza55… dá 404). Minúsculo é só p/ chave de dedup/casamento.
 export function posterHash(url) {
   if (!url || !url.includes('image.tmdb.org')) return null;
-  const seg = url.split('?')[0].split('/').pop().trim().toLowerCase();
+  const seg = url.split('?')[0].split('/').pop().trim();
   return seg.includes('.') ? seg : null;
 }
 
@@ -123,7 +125,8 @@ export function buildCatalog(text, { buckets = 64 } = {}) {
       live.push({ id, name: e.name, logo: e.logo, group: canonCat(e.group), url: e.url, type: e.st });
     } else if (e.type === 'movie') {
       const name = cleanName(e.name);
-      const key = e.posterHash || `${slug(name)}_${e.year}`;
+      // dedup: chave em MINÚSCULO (case-insensitive); o poster guardado mantém o case.
+      const key = (e.posterHash ? e.posterHash.toLowerCase() : null) || `${slug(name)}_${e.year}`;
       if (movieByKey.has(key)) continue; // 1ª vista vence (dublado/cinema costuma vir 1º)
       movieByKey.set(key, {
         id: `m_${streamId(e.url)}`, name, year: e.year,
