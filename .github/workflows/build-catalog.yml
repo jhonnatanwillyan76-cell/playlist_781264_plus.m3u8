@@ -22,6 +22,9 @@ jobs:
       - name: Gerar catálogo
         env:
           CATALOG_TS: ${{ github.run_id }}
+          # Capas de série via TMDB. Sem este secret o enriquecimento é pulado
+          # (capas ficam as da raw). Crie em Settings > Secrets > Actions > TMDB_KEY.
+          TMDB_KEY: ${{ secrets.TMDB_KEY }}
         run: node tool/build-catalog.mjs playlist_781264_plus.m3u8 catalog
       - name: Commit artefatos
         run: |

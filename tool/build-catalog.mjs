@@ -125,9 +125,13 @@ export function buildCatalog(text, { buckets = 64 } = {}) {
       live.push({ id, name: e.name, logo: e.logo, group: canonCat(e.group), url: e.url, type: e.st });
     } else if (e.type === 'movie') {
       const name = cleanName(e.name);
-      // dedup: chave em MINÚSCULO (case-insensitive); o poster guardado mantém o case.
-      const key = (e.posterHash ? e.posterHash.toLowerCase() : null) || `${slug(name)}_${e.year}`;
-      if (movieByKey.has(key)) continue; // 1ª vista vence (dublado/cinema costuma vir 1º)
+      // dedup por NOME+ANO (NÃO por pôster): a MESMA obra reaparece na lista com
+      // pôsteres diferentes — a 1ª cópia é a limpa (.mp4 oficial), a 2ª costuma
+      // ser um rip com anúncio 1xbet embutido. Chavear por hash deixava as duas
+      // passarem (pôsteres != ) e a 2ª vazava só pra aba Filmes (a Home/Busca já
+      // resolvem por nome → pegam a 1ª limpa). Nome+ano colapsa todas na 1ª vista.
+      const key = `${slug(name)}_${e.year}`;
+      if (movieByKey.has(key)) continue; // 1ª vista vence (cópia limpa vem 1º)
       movieByKey.set(key, {
         id: `m_${streamId(e.url)}`, name, year: e.year,
         poster: e.posterHash, cat: canonCat(e.group), url: e.url,
@@ -171,11 +175,55 @@ export async function writeArtifacts(c, outDir) {
   return { live: c.live.length, movies: c.movies.length, shows: c.shows.length, buckets: Object.keys(c.episodeBuckets).length };
 }
 
+// ── Enriquecimento de capas de SÉRIE via TMDB ──────────────────────────────
+// As capas de série da raw são péssimas: genéricas e REPETIDAS (um mesmo hash
+// chega a servir 42 séries diferentes) porque saem do tvg-logo do 1º episódio.
+// Aqui buscamos o pôster CERTO por nome no TMDB, mas SÓ pras capas ruins (hash
+// compartilhado por ≥2 shows, ou ausente) — as capas únicas da raw costumam já
+// estar certas e não vale arriscar trocar. Fail-safe: erro de rede mantém a capa
+// atual (nunca derruba o build). A key vem SÓ do env TMDB_KEY (nunca commitada —
+// este arquivo mora num repo público); sem ela, o enriquecimento é pulado e as
+// capas ficam as da raw. No GitHub Actions passe via secrets.TMDB_KEY.
+const TMDB_KEY = process.env.TMDB_KEY || '';
+const _sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function tmdbShowPoster(name, tries = 2) {
+  const u = `https://api.themoviedb.org/3/search/tv?api_key=${TMDB_KEY}&language=pt-BR&query=${encodeURIComponent(name)}`;
+  const r = await fetch(u);
+  if (r.status === 429 && tries > 0) { await _sleep(1500); return tmdbShowPoster(name, tries - 1); }
+  if (!r.ok) return null;
+  const j = await r.json();
+  const hit = (j.results || []).find((x) => x.poster_path);
+  return hit ? hit.poster_path.replace(/^\//, '') : null;
+}
+
+export async function enrichShowPosters(shows, { concurrency = 10, fetchPoster = tmdbShowPoster } = {}) {
+  const cnt = new Map();
+  for (const s of shows) if (s.poster) cnt.set(s.poster, (cnt.get(s.poster) || 0) + 1);
+  const targets = shows.filter((s) => !s.poster || cnt.get(s.poster) >= 2);
+  let i = 0, fixed = 0;
+  async function worker() {
+    while (i < targets.length) {
+      const s = targets[i++];
+      try { const p = await fetchPoster(s.name); if (p) { s.poster = p; fixed++; } } catch {}
+    }
+  }
+  await Promise.all(Array.from({ length: concurrency }, worker));
+  return { targets: targets.length, fixed };
+}
+
 // CLI (guarda cross-platform via pathToFileURL)
 if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   const [, , input, outDir] = process.argv;
   if (!input || !outDir) { console.error('uso: node build-catalog.mjs <input.m3u8> <outDir>'); process.exit(1); }
   const text = await readFile(input, 'utf8');
-  const stats = await writeArtifacts(buildCatalog(text), outDir);
+  const c = buildCatalog(text);
+  if (process.env.SKIP_ENRICH !== '1' && TMDB_KEY) {
+    const er = await enrichShowPosters(c.shows);
+    console.log('capas de série enriquecidas (TMDB):', er);
+  } else {
+    console.log('enriquecimento de capas PULADO (sem TMDB_KEY) — capas ficam as da raw.');
+  }
+  const stats = await writeArtifacts(c, outDir);
   console.log('catálogo gerado:', stats);
 }
