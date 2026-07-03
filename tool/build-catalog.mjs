@@ -228,12 +228,67 @@ export async function enrichShowPosters(shows, { concurrency = 10, fetchPoster =
   return { targets: targets.length, fixed };
 }
 
+// ── SÉRIES pela API Xtream ──────────────────────────────────────────────────
+// A raw M3U traz IDs de episódio de SÉRIE que estão STALE (o painel re-indexou →
+// 404 em TODA série). A API Xtream (`player_api.php`) tem os IDs ATUAIS. Aqui
+// reconstruímos séries+episódios pela API (URLs que abrem). Movies/live seguem
+// da raw (funcionam). Credenciais saem da PRÓPRIA raw (já estão nas URLs).
+const XUA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+  + '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+
+export function extractCreds(text) {
+  const m = text.match(/(https?:\/\/[^/\s]+)\/(?:movie|series)\/([^/]+)\/([^/]+)\//);
+  return m ? { host: m[1], user: m[2], pass: m[3] } : null;
+}
+
+// Só a LISTA (get_series = 1 chamada, confiável). Os episódios o APP busca
+// on-demand por `sid` ao abrir a série (get_series_info) — o painel é instável
+// pra puxar os 8k de uma vez (perde ~40%), mas 1 chamada por série abre liso.
+export async function buildSeriesFromApi(host, user, pass) {
+  const api = async (action, extra = '') => {
+    const r = await fetch(`${host}/player_api.php?username=${user}&password=${pass}&action=${action}${extra}`,
+      { headers: { 'User-Agent': XUA } });
+    if (!r.ok) throw new Error(`api ${action} ${r.status}`);
+    return JSON.parse(await r.text());
+  };
+  const cats = {};
+  try { for (const c of await api('get_series_categories')) cats[c.category_id] = c.category_name; } catch {}
+  const list = await api('get_series');
+  const showBySlug = new Map();
+  for (const s of (list || [])) {
+    const name = cleanName(s.name || '');
+    const sg = slug(name);
+    if (!sg || showBySlug.has(sg)) continue;
+    showBySlug.set(sg, {
+      slug: sg, name, poster: posterHash(s.cover),
+      cat: canonCat(cats[s.category_id] || ''),
+      sid: s.series_id, // ID Xtream — o app puxa os episódios por ele
+      eps: (s.episode_run_time ? 0 : 0), // desconhecido até abrir; UI não depende
+    });
+  }
+  return { shows: [...showBySlug.values()] };
+}
+
 // CLI (guarda cross-platform via pathToFileURL)
 if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   const [, , input, outDir] = process.argv;
   if (!input || !outDir) { console.error('uso: node build-catalog.mjs <input.m3u8> <outDir>'); process.exit(1); }
   const text = await readFile(input, 'utf8');
   const c = buildCatalog(text);
+  // SÉRIES: troca as da raw (IDs stale → 404) pelas da API Xtream (IDs atuais).
+  if (process.env.SKIP_SERIES_API !== '1') {
+    const creds = extractCreds(text);
+    if (creds) {
+      try {
+        const api = await buildSeriesFromApi(creds.host, creds.user, creds.pass);
+        if (api.shows.length) {
+          c.shows = api.shows;
+          c.episodeBuckets = {}; // episódios são buscados on-demand pelo app (por sid)
+          console.log('séries (lista) da API Xtream:', api.shows.length);
+        }
+      } catch (e) { console.log('API de séries falhou (mantém raw):', e.message); }
+    }
+  }
   // 1) DURÁVEL: preserva as capas boas já publicadas (sem key, sem rede) — evita
   //    que o cron do Action volte as capas boas pras ruins da raw.
   try {
